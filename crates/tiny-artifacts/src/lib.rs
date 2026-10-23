@@ -57,7 +57,7 @@ pub use diff::{ArtifactDiff, DiffLine, DiffOp, MAX_DIFF_LINES};
 pub use document_store::DocumentArtifactStore;
 pub use events::{ArtifactEvent, ArtifactEventKind, ArtifactObserver};
 pub use file_ref::{media_type_for, FileRef, FileRefError, FileRoots, PathGuard, ResolvedFile};
-pub use file_store::{BlobFileStore, FileMetadata, FileStore};
+pub use file_store::{BlobFileStore, FileMetadata, FileStore, FsFileStore};
 pub use publish::{ArtifactPublisher, PublishOptions};
 pub use service::{Artifacts, ArtifactsError, Author, Content, Published, Saved};
 pub use storage::collections;
