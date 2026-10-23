@@ -14,10 +14,34 @@ fn a_failed_staging_write_removes_its_partial_file() {
 
     let root = temp_dir();
     let directory = Dir::open_ambient_dir(&root, ambient_authority()).unwrap();
-    let result = write_staging_file(&directory, ".partial.tmp", |file| {
-        file.write_all(b"partial")?;
-        Err(std::io::Error::other("injected write failure"))
-    });
+    let result = write_staging_file(
+        &directory,
+        ".partial.tmp",
+        |file| {
+            file.write_all(b"partial")?;
+            Err(std::io::Error::other("injected write failure"))
+        },
+        |file| file.sync_all(),
+    );
+
+    assert!(result.is_err());
+    assert!(!root.join(".partial.tmp").exists());
+}
+
+#[test]
+fn a_failed_staging_sync_removes_its_complete_file() {
+    use cap_std::ambient_authority;
+    use cap_std::fs::Dir;
+    use std::io::Write;
+
+    let root = temp_dir();
+    let directory = Dir::open_ambient_dir(&root, ambient_authority()).unwrap();
+    let result = write_staging_file(
+        &directory,
+        ".partial.tmp",
+        |file| file.write_all(b"complete"),
+        |_| Err(std::io::Error::other("injected sync failure")),
+    );
 
     assert!(result.is_err());
     assert!(!root.join(".partial.tmp").exists());
@@ -296,6 +320,107 @@ async fn filesystem_store_round_trips_and_deletes_only_the_requested_prefix() {
         .delete_prefix("artifacts/files/missing/")
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn metadata_treats_a_missing_root_as_an_absent_file() {
+    let root = temp_dir().join("not-created");
+    let store = FsFileStore::new(&root);
+
+    assert_eq!(store.metadata("missing.txt").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn filesystem_operations_report_a_root_nested_under_a_file() {
+    let base = temp_dir();
+    let parent = base.join("file");
+    std::fs::write(&parent, b"not a directory").unwrap();
+    let root = parent.join("store");
+    let store = FsFileStore::new(&root);
+
+    assert!(store.read("missing.txt").await.is_err());
+    assert!(store.metadata("missing.txt").await.is_err());
+    assert!(store.delete_prefix("artifacts/").await.is_err());
+    assert!(store.put("file.txt", b"bytes", None).await.is_err());
+    assert_eq!(std::fs::read(parent).unwrap(), b"not a directory");
+}
+
+#[tokio::test]
+async fn metadata_treats_a_directory_target_as_absent() {
+    let root = temp_dir();
+    std::fs::create_dir(root.join("directory")).unwrap();
+
+    assert_eq!(
+        FsFileStore::new(&root).metadata("directory").await.unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn put_cleans_up_when_the_target_is_a_directory() {
+    let root = temp_dir();
+    std::fs::create_dir(root.join("directory")).unwrap();
+    let store = FsFileStore::new(&root);
+
+    assert!(store.put("directory", b"bytes", None).await.is_err());
+    assert!(std::fs::read_dir(&root).unwrap().all(|entry| !entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .ends_with(".tmp")));
+}
+
+#[tokio::test]
+async fn put_rejects_a_parent_that_is_a_regular_file() {
+    let root = temp_dir();
+    std::fs::write(root.join("parent"), b"file").unwrap();
+    let store = FsFileStore::new(&root);
+
+    assert!(store.put("parent/child", b"bytes", None).await.is_err());
+    assert_eq!(std::fs::read(root.join("parent")).unwrap(), b"file");
+}
+
+#[tokio::test]
+async fn delete_prefix_treats_a_missing_root_as_empty() {
+    let root = temp_dir().join("not-created");
+
+    FsFileStore::new(&root)
+        .delete_prefix("artifacts/")
+        .await
+        .unwrap();
+
+    assert!(!root.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn delete_prefix_through_an_in_root_symlink_removes_the_target_contents() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_dir();
+    let target = root.join("target");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("artifact.bin"), b"bytes").unwrap();
+    symlink(&target, root.join("alias")).unwrap();
+
+    FsFileStore::new(&root)
+        .delete_prefix("alias/")
+        .await
+        .unwrap();
+
+    assert!(!target.join("artifact.bin").exists());
+}
+
+#[tokio::test]
+async fn delete_prefix_reports_a_file_instead_of_a_directory() {
+    let root = temp_dir();
+    std::fs::write(root.join("file"), b"keep").unwrap();
+
+    assert!(FsFileStore::new(&root)
+        .delete_prefix("file/")
+        .await
+        .is_err());
+    assert_eq!(std::fs::read(root.join("file")).unwrap(), b"keep");
 }
 
 #[tokio::test]
