@@ -658,8 +658,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-api"
-version = "2.1.0"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=05eaada962decbab33bafa4763d2bd1a67f6b456#05eaada962decbab33bafa4763d2bd1a67f6b456"
+version = "2.1.1"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=bf1f0a9#bf1f0a97fbe6165a6edd9521659c7f6859700761"
 dependencies = [
  "async-trait",
  "bytes",
@@ -672,8 +672,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-blob"
-version = "2.1.0"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=05eaada962decbab33bafa4763d2bd1a67f6b456#05eaada962decbab33bafa4763d2bd1a67f6b456"
+version = "2.1.1"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=bf1f0a9#bf1f0a97fbe6165a6edd9521659c7f6859700761"
 dependencies = [
  "async-trait",
  "bytes",
@@ -686,8 +686,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-connect"
-version = "2.1.0"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=05eaada962decbab33bafa4763d2bd1a67f6b456#05eaada962decbab33bafa4763d2bd1a67f6b456"
+version = "2.1.1"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=bf1f0a9#bf1f0a97fbe6165a6edd9521659c7f6859700761"
 dependencies = [
  "rusqlite",
  "serde_json",
@@ -698,8 +698,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-document"
-version = "2.1.0"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=05eaada962decbab33bafa4763d2bd1a67f6b456#05eaada962decbab33bafa4763d2bd1a67f6b456"
+version = "2.1.1"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=bf1f0a9#bf1f0a97fbe6165a6edd9521659c7f6859700761"
 dependencies = [
  "async-trait",
  "data-encoding",
@@ -716,8 +716,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-kv"
-version = "2.1.0"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=05eaada962decbab33bafa4763d2bd1a67f6b456#05eaada962decbab33bafa4763d2bd1a67f6b456"
+version = "2.1.1"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=bf1f0a9#bf1f0a97fbe6165a6edd9521659c7f6859700761"
 dependencies = [
  "async-trait",
  "serde",
@@ -728,8 +728,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-queue"
-version = "2.1.0"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=05eaada962decbab33bafa4763d2bd1a67f6b456#05eaada962decbab33bafa4763d2bd1a67f6b456"
+version = "2.1.1"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=bf1f0a9#bf1f0a97fbe6165a6edd9521659c7f6859700761"
 dependencies = [
  "async-trait",
  "data-encoding",
@@ -744,8 +744,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-secrets"
-version = "2.1.0"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=05eaada962decbab33bafa4763d2bd1a67f6b456#05eaada962decbab33bafa4763d2bd1a67f6b456"
+version = "2.1.1"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=bf1f0a9#bf1f0a97fbe6165a6edd9521659c7f6859700761"
 dependencies = [
  "async-trait",
  "tinystoragedrivers-api",
@@ -755,8 +755,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-testkit"
-version = "2.1.0"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=05eaada962decbab33bafa4763d2bd1a67f6b456#05eaada962decbab33bafa4763d2bd1a67f6b456"
+version = "2.1.1"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=bf1f0a9#bf1f0a97fbe6165a6edd9521659c7f6859700761"
 dependencies = [
  "async-trait",
  "bytes",
@@ -776,8 +776,8 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-types"
-version = "2.1.0"
-source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=05eaada962decbab33bafa4763d2bd1a67f6b456#05eaada962decbab33bafa4763d2bd1a67f6b456"
+version = "2.1.1"
+source = "git+https://github.com/tinyhumansai/tinystoragedrivers.git?rev=bf1f0a9#bf1f0a97fbe6165a6edd9521659c7f6859700761"
 dependencies = [
  "serde",
  "serde_json",
@@ -787,7 +787,7 @@ dependencies = [
 [[package]]
 name = "tinytools"
 version = "0.6.0"
-source = "git+https://github.com/tinyhumansai/tinytools.git?rev=3a01641#3a01641f8ebd8a55656cd212f9a90638d958a447"
+source = "git+https://github.com/tinyhumansai/tinytools.git?rev=41cc80ac9acf37a14f20be94f60ee552749f1540#41cc80ac9acf37a14f20be94f60ee552749f1540"
 dependencies = [
  "anyhow",
  "async-trait",
