@@ -161,3 +161,101 @@ fn a_guard_shows_in_debug_and_equality() {
     assert_eq!(plain, FileRoots::new([PathBuf::from("/a")]));
     assert_ne!(guarded, plain.clone().with_guard(|_| None));
 }
+
+#[tokio::test]
+async fn an_async_guard_is_awaited_with_the_canonical_path() {
+    let root = dir();
+    std::fs::write(root.join("notes.txt"), b"fine").unwrap();
+    let canonical = std::fs::canonicalize(root.join("notes.txt")).unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = seen.clone();
+    let roots = FileRoots::new([root.clone()]).with_async_guard(move |path| {
+        let captured = captured.clone();
+        async move {
+            tokio::task::yield_now().await;
+            captured.lock().unwrap().push(path);
+            None
+        }
+    });
+
+    let file = roots.resolve("./notes.txt").await.unwrap();
+    assert_eq!(file.path, canonical);
+    assert_eq!(*seen.lock().unwrap(), [canonical]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn an_async_guard_refuses_a_path_with_the_hosts_reason() {
+    let root = dir();
+    std::fs::write(root.join("key.txt"), b"key").unwrap();
+    let roots = FileRoots::new([root.clone()]).with_async_guard(|_| async {
+        tokio::task::yield_now().await;
+        Some("host authorization unavailable".to_string())
+    });
+
+    let error = roots.resolve("key.txt").await.unwrap_err();
+    assert!(matches!(
+        error,
+        FileRefError::Refused { path, reason }
+            if path == "key.txt" && reason == "host authorization unavailable"
+    ));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn containment_and_sync_refusals_precede_the_async_guard() {
+    let root = dir();
+    let outside = dir();
+    std::fs::write(root.join("notes.txt"), b"fine").unwrap();
+    std::fs::write(outside.join("other.txt"), b"private").unwrap();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured = calls.clone();
+    let roots = FileRoots::new([root.clone()])
+        .with_guard(|_| Some("sync refusal".to_string()))
+        .with_async_guard(move |_| {
+            captured.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { None }
+        });
+
+    assert!(matches!(
+        roots
+            .resolve(outside.join("other.txt").to_str().unwrap())
+            .await,
+        Err(FileRefError::OutsideRoots(_))
+    ));
+    assert!(matches!(
+        roots.resolve("notes.txt").await,
+        Err(FileRefError::Refused { reason, .. }) if reason == "sync refusal"
+    ));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
+#[tokio::test]
+async fn an_async_guard_cannot_authorize_parent_traversal_outside_the_roots() {
+    // Parent components exercise the same canonical containment check on all
+    // platforms, without requiring symlink privileges on Windows.
+    let root = dir();
+    let inside = root.join("inside");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::write(root.join("outside.txt"), b"private").unwrap();
+    let roots = FileRoots::new([inside]).with_async_guard(|_| async { None });
+    assert!(matches!(
+        roots.resolve("../outside.txt").await,
+        Err(FileRefError::OutsideRoots(_))
+    ));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn async_guards_are_shared_by_clones_and_distinct_in_debug_and_equality() {
+    let plain = FileRoots::new([PathBuf::from("/a")]);
+    let guarded = plain.clone().with_async_guard(|_| async { None });
+    assert!(format!("{guarded:?}").contains("async_guard: true"));
+    assert!(format!("{plain:?}").contains("async_guard: false"));
+    assert_ne!(plain, guarded);
+    assert_eq!(guarded, guarded.clone());
+    assert_ne!(guarded, plain.clone().with_async_guard(|_| async { None }));
+    assert_ne!(guarded, guarded.clone().with_guard(|_| None));
+}

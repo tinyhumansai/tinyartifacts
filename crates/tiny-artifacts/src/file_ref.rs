@@ -5,7 +5,9 @@
 //! filesystem path. [`FileRoots`] validates incoming host paths before a file
 //! store reads them.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -59,7 +61,8 @@ pub enum FileRefError {
     /// The path resolves outside every allowed folder.
     #[error("`{0}` is outside the folders artifacts may reference")]
     OutsideRoots(String),
-    /// The host's guard refused the path (see [`FileRoots::with_guard`]).
+    /// A host guard refused the path (see [`FileRoots::with_guard`] and
+    /// [`FileRoots::with_async_guard`]).
     #[error("`{path}` cannot be referenced: {reason}")]
     Refused {
         /// The path as given.
@@ -80,6 +83,9 @@ pub enum FileRefError {
 
 /// A host's last word on a resolved path: `Some(reason)` refuses it.
 pub type PathGuard = Arc<dyn Fn(&Path) -> Option<String> + Send + Sync>;
+
+type PathGuardFuture = Pin<Box<dyn Future<Output = Option<String>> + Send>>;
+type AsyncPathGuard = Arc<dyn Fn(PathBuf) -> PathGuardFuture + Send + Sync>;
 
 /// A host path that passed [`FileRoots`] validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,12 +120,14 @@ impl ResolvedFile {
 /// A relative path is resolved against the first root (the agent's working
 /// folder, typically). Every path is canonicalized before the containment
 /// check, so `..` segments and symlinks cannot reach outside. A host can also
-/// refuse paths inside the roots ([`Self::with_guard`]), such as credential
-/// stores under a broad working folder.
+/// refuse paths inside the roots ([`Self::with_guard`] or
+/// [`Self::with_async_guard`]), such as credential stores under a broad working
+/// folder. Both guards run after containment, with the synchronous guard first.
 #[derive(Clone, Default)]
 pub struct FileRoots {
     roots: Vec<PathBuf>,
     guard: Option<PathGuard>,
+    async_guard: Option<AsyncPathGuard>,
 }
 
 impl std::fmt::Debug for FileRoots {
@@ -127,6 +135,7 @@ impl std::fmt::Debug for FileRoots {
         f.debug_struct("FileRoots")
             .field("roots", &self.roots)
             .field("guard", &self.guard.is_some())
+            .field("async_guard", &self.async_guard.is_some())
             .finish()
     }
 }
@@ -138,7 +147,12 @@ impl PartialEq for FileRoots {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             _ => false,
         };
-        self.roots == other.roots && same_guard
+        let same_async_guard = match (&self.async_guard, &other.async_guard) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        self.roots == other.roots && same_guard && same_async_guard
     }
 }
 
@@ -151,6 +165,7 @@ impl FileRoots {
         Self {
             roots: roots.into_iter().collect(),
             guard: None,
+            async_guard: None,
         }
     }
 
@@ -166,6 +181,27 @@ impl FileRoots {
         self
     }
 
+    /// Await host authorization of each canonical path before returning it
+    /// for file I/O. `Some(reason)` refuses it with [`FileRefError::Refused`];
+    /// `None` permits resolution to continue.
+    ///
+    /// Containment and any synchronous [`Self::with_guard`] run first, so this
+    /// guard cannot authorize a path outside the roots or override a refusal.
+    /// Hosts should return a refusal when their authorization service is
+    /// unavailable. Each call replaces the previous asynchronous guard without
+    /// changing the synchronous guard. Clones share both guard closures.
+    #[must_use]
+    pub fn with_async_guard<F>(
+        mut self,
+        guard: impl Fn(PathBuf) -> F + Send + Sync + 'static,
+    ) -> Self
+    where
+        F: Future<Output = Option<String>> + Send + 'static,
+    {
+        self.async_guard = Some(Arc::new(move |path| Box::pin(guard(path))));
+        self
+    }
+
     /// The allowed folders.
     #[must_use]
     pub fn roots(&self) -> &[PathBuf] {
@@ -178,7 +214,8 @@ impl FileRoots {
     ///
     /// Returns a [`FileRefError`] when there are no roots, the path is empty,
     /// nothing is there, it is not a regular file, or it resolves outside
-    /// every root.
+    /// every root. A synchronous or asynchronous host guard refusal returns
+    /// [`FileRefError::Refused`] with the host's reason.
     pub async fn resolve(&self, raw: &str) -> Result<ResolvedFile, FileRefError> {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -220,6 +257,14 @@ impl FileRoots {
                 path: raw.to_string(),
                 reason,
             });
+        }
+        if let Some(guard) = &self.async_guard {
+            if let Some(reason) = guard(canonical.clone()).await {
+                return Err(FileRefError::Refused {
+                    path: raw.to_string(),
+                    reason,
+                });
+            }
         }
         let meta = tokio::fs::metadata(&canonical)
             .await

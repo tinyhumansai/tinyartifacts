@@ -151,3 +151,92 @@ async fn separate_services_read_share_and_delete_shared_file_versions() {
         0
     );
 }
+
+#[tokio::test]
+async fn async_host_refusal_prevents_file_import_and_record_creation() {
+    let input = temp_dir();
+    std::fs::write(input.join("key.txt"), b"private").unwrap();
+    let records = Records::default();
+    let backend = memory_backend();
+    let scope = Scope::new("artifact-denied-import").unwrap();
+    let storage = backend.for_scope(&scope).unwrap();
+    let artifacts = Artifacts::new(Arc::new(records.clone()))
+        .with_file_roots(FileRoots::new([input.clone()]).with_async_guard(|_| async {
+            tokio::task::yield_now().await;
+            Some("protected location".to_string())
+        }))
+        .with_file_store(Arc::new(BlobFileStore::new(&storage)));
+
+    let error = artifacts
+        .create(
+            ArtifactKind::File,
+            "Key",
+            Content::File("key.txt".into()),
+            &Author::agent("writer"),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("protected location"), "{error}");
+    assert!(records.list().await.unwrap().is_empty());
+    assert!(storage.blobs().list("").await.unwrap().is_empty());
+    std::fs::remove_dir_all(input).unwrap();
+}
+
+#[tokio::test]
+async fn an_async_guard_is_rechecked_before_importing_a_revised_file() {
+    let input = temp_dir();
+    std::fs::write(input.join("report.txt"), b"version one").unwrap();
+    let records = Records::default();
+    let backend = memory_backend();
+    let scope = Scope::new("artifact-denied-revision").unwrap();
+    let storage = backend.for_scope(&scope).unwrap();
+    let refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let captured = refused.clone();
+    let artifacts = Artifacts::new(Arc::new(records))
+        .with_file_roots(FileRoots::new([input.clone()]).with_async_guard(move |_| {
+            let captured = captured.clone();
+            async move {
+                tokio::task::yield_now().await;
+                captured
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    .then(|| "protected location".to_string())
+            }
+        }))
+        .with_file_store(Arc::new(BlobFileStore::new(&storage)));
+    let saved = artifacts
+        .create(
+            ArtifactKind::File,
+            "Report",
+            Content::File("report.txt".into()),
+            &Author::agent("writer"),
+            None,
+        )
+        .await
+        .unwrap();
+    refused.store(true, std::sync::atomic::Ordering::SeqCst);
+    std::fs::write(input.join("report.txt"), b"must not import").unwrap();
+
+    let error = artifacts
+        .revise(
+            &saved.record.id,
+            Content::File("report.txt".into()),
+            &Author::agent("writer"),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("protected location"), "{error}");
+    assert_eq!(
+        artifacts
+            .get(&saved.record.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .versions
+            .len(),
+        1
+    );
+    assert_eq!(storage.blobs().list("").await.unwrap().len(), 1);
+    std::fs::remove_dir_all(input).unwrap();
+}
