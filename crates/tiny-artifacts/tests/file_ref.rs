@@ -161,3 +161,272 @@ fn a_guard_shows_in_debug_and_equality() {
     assert_eq!(plain, FileRoots::new([PathBuf::from("/a")]));
     assert_ne!(guarded, plain.clone().with_guard(|_| None));
 }
+
+#[tokio::test]
+async fn an_async_guard_is_awaited_with_the_canonical_path() {
+    let root = dir();
+    std::fs::write(root.join("notes.txt"), b"fine").unwrap();
+    let canonical = std::fs::canonicalize(root.join("notes.txt")).unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = seen.clone();
+    let roots = FileRoots::new([root.clone()]).with_async_guard(move |path| {
+        let captured = captured.clone();
+        async move {
+            tokio::task::yield_now().await;
+            captured.lock().unwrap().push(path);
+            None
+        }
+    });
+
+    let file = roots.resolve("./notes.txt").await.unwrap();
+    assert_eq!(file.path, canonical);
+    assert_eq!(*seen.lock().unwrap(), [canonical]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn an_async_guard_refuses_a_path_with_the_hosts_reason() {
+    let root = dir();
+    std::fs::write(root.join("key.txt"), b"key").unwrap();
+    let roots = FileRoots::new([root.clone()]).with_async_guard(|_| async {
+        tokio::task::yield_now().await;
+        Some("host authorization unavailable".to_string())
+    });
+
+    let error = roots.resolve("key.txt").await.unwrap_err();
+    assert!(matches!(
+        error,
+        FileRefError::Refused { path, reason }
+            if path == "key.txt" && reason == "host authorization unavailable"
+    ));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn containment_and_sync_refusals_precede_the_async_guard() {
+    let root = dir();
+    let outside = dir();
+    std::fs::write(root.join("notes.txt"), b"fine").unwrap();
+    std::fs::write(outside.join("other.txt"), b"private").unwrap();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured = calls.clone();
+    let roots = FileRoots::new([root.clone()])
+        .with_guard(|_| Some("sync refusal".to_string()))
+        .with_async_guard(move |_| {
+            captured.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { None }
+        });
+
+    assert!(matches!(
+        roots
+            .resolve(outside.join("other.txt").to_str().unwrap())
+            .await,
+        Err(FileRefError::OutsideRoots(_))
+    ));
+    assert!(matches!(
+        roots.resolve("notes.txt").await,
+        Err(FileRefError::Refused { reason, .. }) if reason == "sync refusal"
+    ));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
+#[tokio::test]
+async fn an_async_guard_cannot_authorize_parent_traversal_outside_the_roots() {
+    // Parent components exercise the same canonical containment check on all
+    // platforms, without requiring symlink privileges on Windows.
+    let root = dir();
+    let inside = root.join("inside");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::write(root.join("outside.txt"), b"private").unwrap();
+    let roots = FileRoots::new([inside]).with_async_guard(|_| async { None });
+    assert!(matches!(
+        roots.resolve("../outside.txt").await,
+        Err(FileRefError::OutsideRoots(_))
+    ));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn async_guards_are_shared_by_clones_and_distinct_in_debug_and_equality() {
+    let plain = FileRoots::new([PathBuf::from("/a")]);
+    let guarded = plain.clone().with_async_guard(|_| async { None });
+    assert!(format!("{guarded:?}").contains("async_guard: true"));
+    assert!(format!("{plain:?}").contains("async_guard: false"));
+    assert_ne!(plain, guarded);
+    assert_eq!(guarded, guarded.clone());
+    assert_ne!(guarded, plain.clone().with_async_guard(|_| async { None }));
+    assert_ne!(guarded, guarded.clone().with_guard(|_| None));
+}
+
+#[tokio::test]
+async fn authorized_read_returns_the_resolved_metadata_and_approved_bytes() {
+    let root = dir();
+    std::fs::write(root.join("notes.txt"), b"approved").unwrap();
+    let roots = FileRoots::new([root.clone()]).with_async_guard(|_| async {
+        tokio::task::yield_now().await;
+        None
+    });
+
+    let (file, bytes) = roots.read("notes.txt").await.unwrap();
+    assert_eq!(
+        file.path,
+        std::fs::canonicalize(root.join("notes.txt")).unwrap()
+    );
+    assert_eq!(file.size_bytes, 8);
+    assert_eq!(file.media_type.as_deref(), Some("text/plain"));
+    assert_eq!(bytes, b"approved");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn authorized_read_preserves_guard_refusal_without_returning_bytes() {
+    let root = dir();
+    std::fs::write(root.join("notes.txt"), b"private!").unwrap();
+    let roots = FileRoots::new([root.clone()])
+        .with_async_guard(|_| async { Some("protected location".to_string()) });
+    assert!(matches!(
+        roots.read("notes.txt").await,
+        Err(FileRefError::Refused { reason, .. }) if reason == "protected location"
+    ));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn authorized_read_refuses_a_fifo_without_waiting_for_a_writer() {
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::time::Duration;
+
+    let root = dir();
+    let fifo = root.join("input.pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("the Unix mkfifo utility creates the fixture");
+    assert!(status.success(), "mkfifo must create the named pipe");
+    let (sender, receiver) = mpsc::channel();
+    let roots = FileRoots::new([root.clone()]);
+    let worker = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        sender
+            .send(runtime.block_on(roots.read("input.pipe")))
+            .unwrap();
+    });
+
+    let first = receiver.recv_timeout(Duration::from_secs(5));
+    let waited_for_writer = matches!(&first, Err(RecvTimeoutError::Timeout));
+    // Unblock a regressed read-only FIFO open before asserting. Keeping this
+    // read/write endpoint open until the response arrives also handles a worker
+    // that did not reach open() until after the timeout; no thread is abandoned.
+    let unblock = waited_for_writer.then(|| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fifo)
+            .unwrap()
+    });
+    let result = first.unwrap_or_else(|_| {
+        receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("opening the FIFO's writer releases the worker for cleanup")
+    });
+    drop(unblock);
+    worker.join().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+
+    assert!(
+        !waited_for_writer,
+        "rejecting a non-file must not wait for an unrelated FIFO writer"
+    );
+    assert!(
+        matches!(result, Err(FileRefError::NotAFile(_))),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn stored_file_references_expose_the_key_name_and_normalized_extension() {
+    let reference = FileRef {
+        key: "reports/Report.PDF".into(),
+        size_bytes: 4,
+        media_type: None,
+    };
+    assert_eq!(reference.file_name(), Some("Report.PDF"));
+    assert_eq!(reference.extension().as_deref(), Some("pdf"));
+    let root = FileRef {
+        key: "/".into(),
+        ..reference
+    };
+    assert_eq!(root.file_name(), None);
+    assert_eq!(root.extension(), None);
+}
+
+#[tokio::test]
+async fn authorized_reads_preserve_resolution_failures_before_importing_bytes() {
+    let root = dir();
+    let outside = dir();
+    std::fs::write(outside.join("outside.txt"), b"private!").unwrap();
+    let roots = FileRoots::new([root.clone()]);
+    assert!(matches!(roots.read("  ").await, Err(FileRefError::Empty)));
+    assert!(matches!(
+        FileRoots::default().read("notes.txt").await,
+        Err(FileRefError::NoRoots)
+    ));
+    assert!(matches!(
+        roots.read("missing.txt").await,
+        Err(FileRefError::Missing(path)) if path == "missing.txt"
+    ));
+    assert!(matches!(
+        roots
+            .read(outside.join("outside.txt").to_str().unwrap())
+            .await,
+        Err(FileRefError::OutsideRoots(_))
+    ));
+    assert!(matches!(
+        roots.read(".").await,
+        Err(FileRefError::NotAFile(_))
+    ));
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
+#[tokio::test]
+async fn authorized_read_preserves_a_sync_refusal_before_the_async_guard() {
+    let root = dir();
+    std::fs::write(root.join("notes.txt"), b"private!").unwrap();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured = calls.clone();
+    let roots = FileRoots::new([root.clone()])
+        .with_guard(|_| Some("protected by the host".into()))
+        .with_async_guard(move |_| {
+            captured.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { None }
+        });
+    assert!(matches!(
+        roots.read("notes.txt").await,
+        Err(FileRefError::Refused { reason, .. }) if reason == "protected by the host"
+    ));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn metadata_resolution_reports_a_file_removed_by_the_host_guard() {
+    let root = dir();
+    std::fs::write(root.join("notes.txt"), b"approved").unwrap();
+    let roots = FileRoots::new([root.clone()]).with_async_guard(|path| async move {
+        std::fs::remove_file(path).unwrap();
+        None
+    });
+    assert!(matches!(
+        roots.resolve("notes.txt").await,
+        Err(FileRefError::Io { path, source })
+            if path == "notes.txt" && source.kind() == std::io::ErrorKind::NotFound
+    ));
+    std::fs::remove_dir_all(root).unwrap();
+}
