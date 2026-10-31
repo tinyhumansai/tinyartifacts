@@ -240,3 +240,110 @@ async fn an_async_guard_is_rechecked_before_importing_a_revised_file() {
     assert_eq!(storage.blobs().list("").await.unwrap().len(), 1);
     std::fs::remove_dir_all(input).unwrap();
 }
+
+#[cfg(unix)]
+async fn refuse_a_source_swapped_while_its_import_is_authorized(
+    swap_parent: bool,
+    protected_inside_root: bool,
+) {
+    let input = temp_dir();
+    let outside = temp_dir();
+    let approved_dir = input.join("approved");
+    std::fs::create_dir_all(&approved_dir).unwrap();
+    let source = approved_dir.join("report.txt");
+    std::fs::write(&source, b"approved").unwrap();
+    let hidden_dir = if protected_inside_root {
+        input.join(".ssh")
+    } else {
+        outside.clone()
+    };
+    std::fs::create_dir_all(&hidden_dir).unwrap();
+    let hidden = hidden_dir.join("report.txt");
+    // Equal sizes ensure the old size-change check cannot mask the leak.
+    std::fs::write(&hidden, b"private!").unwrap();
+    let records = Records::default();
+    let backend = memory_backend();
+    let scope = Scope::new("artifact-swapped-source").unwrap();
+    let storage = backend.for_scope(&scope).unwrap();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_calls = calls.clone();
+    let roots = FileRoots::new([input.clone()]).with_async_guard(move |path| {
+        let calls = captured_calls.clone();
+        let source = source.clone();
+        let approved_dir = approved_dir.clone();
+        let hidden = hidden.clone();
+        let hidden_dir = hidden_dir.clone();
+        async move {
+            if path.components().any(|part| part.as_os_str() == ".ssh") {
+                return Some("protected location".to_string());
+            }
+            // The first resolution prepares the version. The second one is
+            // immediately before the actual import; replace the approved name
+            // only after that import's guard has received its canonical path.
+            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                if swap_parent {
+                    std::fs::rename(&approved_dir, approved_dir.with_extension("saved")).unwrap();
+                    std::os::unix::fs::symlink(hidden_dir, approved_dir).unwrap();
+                } else {
+                    std::fs::rename(&source, source.with_extension("saved")).unwrap();
+                    std::os::unix::fs::symlink(hidden, source).unwrap();
+                }
+            }
+            tokio::task::yield_now().await;
+            None
+        }
+    });
+    let artifacts = Artifacts::new(Arc::new(records.clone()))
+        .with_file_roots(roots)
+        .with_file_store(Arc::new(BlobFileStore::new(&storage)));
+
+    let result = artifacts
+        .create(
+            ArtifactKind::File,
+            "Report",
+            Content::File("approved/report.txt".into()),
+            &Author::agent("writer"),
+            None,
+        )
+        .await;
+    if let Ok(saved) = result {
+        let file = saved.record.versions[0].file.as_ref().unwrap();
+        let bytes = storage.blobs().get(&file.key).await.unwrap().unwrap().bytes;
+        assert_eq!(
+            bytes, b"approved",
+            "only the approved open file may be imported"
+        );
+        assert_eq!(records.list().await.unwrap().len(), 1);
+        assert_eq!(storage.blobs().list("").await.unwrap().len(), 1);
+    } else {
+        assert!(records.list().await.unwrap().is_empty());
+        assert!(storage.blobs().list("").await.unwrap().is_empty());
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    std::fs::remove_dir_all(input).unwrap();
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_async_guard_cannot_be_bypassed_by_swapping_the_file_for_an_outside_symlink() {
+    refuse_a_source_swapped_while_its_import_is_authorized(false, false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_async_guard_cannot_be_bypassed_by_swapping_the_file_for_a_protected_symlink() {
+    refuse_a_source_swapped_while_its_import_is_authorized(false, true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_async_guard_cannot_be_bypassed_by_swapping_a_parent_for_an_outside_symlink() {
+    refuse_a_source_swapped_while_its_import_is_authorized(true, false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_async_guard_cannot_be_bypassed_by_swapping_a_parent_for_a_protected_symlink() {
+    refuse_a_source_swapped_while_its_import_is_authorized(true, true).await;
+}

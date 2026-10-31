@@ -447,15 +447,12 @@ impl Artifacts {
         if !holds_file || version.file.is_some() {
             return Ok(());
         }
-        let source = self.files.resolve(&version.body).await?;
+        let (source, bytes) = self.files.read(&version.body).await?;
         let name = match source.path.extension().and_then(|ext| ext.to_str()) {
             Some(ext) => format!("v{}.{ext}", version.version),
             None => format!("v{}", version.version),
         };
         let key = format!("artifacts/files/{id}/{name}");
-        let bytes = tokio::fs::read(&source.path)
-            .await
-            .map_err(anyhow::Error::from)?;
         let metadata = file_store
             .put(&key, &bytes, source.media_type.as_deref())
             .await?;

@@ -3,10 +3,12 @@
 //! A versioned artifact never carries binary content. A version records a
 //! [`FileRef`] containing a storage key, never a local
 //! filesystem path. [`FileRoots`] validates incoming host paths before a file
-//! store reads them.
+//! store reads them. Use [`FileRoots::read`] to keep authorization bound to the
+//! open file while its bytes are read.
 
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::io::{self, Read};
+use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -90,7 +92,8 @@ type AsyncPathGuard = Arc<dyn Fn(PathBuf) -> PathGuardFuture + Send + Sync>;
 /// A host path that passed [`FileRoots`] validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedFile {
-    /// Canonical path that may be read by a file store.
+    /// Canonical path at resolution time. This name can change; use
+    /// [`FileRoots::read`] to read through the authorized open file.
     pub path: PathBuf,
     /// Size of the file when it was resolved.
     pub size_bytes: u64,
@@ -141,6 +144,7 @@ impl std::fmt::Debug for FileRoots {
 }
 
 impl PartialEq for FileRoots {
+    /// Compare roots and shared guard identities; distinct closures are unequal.
     fn eq(&self, other: &Self) -> bool {
         let same_guard = match (&self.guard, &other.guard) {
             (None, None) => true,
@@ -181,9 +185,10 @@ impl FileRoots {
         self
     }
 
-    /// Await host authorization of each canonical path before returning it
-    /// for file I/O. `Some(reason)` refuses it with [`FileRefError::Refused`];
-    /// `None` permits resolution to continue.
+    /// Await host authorization of each canonical path during resolution or
+    /// reading. `Some(reason)` refuses it with [`FileRefError::Refused`];
+    /// `None` permits the operation to continue. Use [`Self::read`] to keep the
+    /// authorized file open across the guard and read its bytes safely.
     ///
     /// Containment and any synchronous [`Self::with_guard`] run first, so this
     /// guard cannot authorize a path outside the roots or override a refusal.
@@ -208,7 +213,11 @@ impl FileRoots {
         &self.roots
     }
 
-    /// Resolve `raw` to a checked, canonical source path.
+    /// Resolve `raw` to a checked, canonical source path and metadata snapshot.
+    ///
+    /// The returned path is not a durable authorization capability: a file or
+    /// directory can be replaced after resolution. Use [`Self::read`] when
+    /// importing bytes instead of reopening the returned path.
     ///
     /// # Errors
     ///
@@ -218,6 +227,69 @@ impl FileRoots {
     /// [`FileRefError::Refused`] with the host's reason.
     pub async fn resolve(&self, raw: &str) -> Result<ResolvedFile, FileRefError> {
         let raw = raw.trim();
+        let canonical = self.canonical_path(raw).await?;
+        self.authorize_path(raw, &canonical).await?;
+        let meta = tokio::fs::metadata(&canonical)
+            .await
+            .map_err(|source| FileRefError::Io {
+                path: raw.to_string(),
+                source,
+            })?;
+        resolved_file(raw, canonical, &meta)
+    }
+
+    /// Read bytes from the same open file authorized by containment and both
+    /// host guards, returning its canonical-path metadata alongside the bytes.
+    ///
+    /// Every component of the canonical path is opened without following
+    /// symlinks before the guards run. The file stays open across asynchronous
+    /// authorization and reading, so replacing a file or a parent directory
+    /// with a symlink cannot redirect this read to an unauthorized target.
+    ///
+    /// # Errors
+    ///
+    /// Returns the resolution and guard errors described by [`Self::resolve`].
+    /// Opening or reading the file, including a symlink replacing a canonical
+    /// path component before opening, can also return [`FileRefError::Io`].
+    pub async fn read(&self, raw: &str) -> Result<(ResolvedFile, Vec<u8>), FileRefError> {
+        let raw = raw.trim();
+        let canonical = self.canonical_path(raw).await?;
+        let open_path = canonical.clone();
+        let (mut file, meta) = tokio::task::spawn_blocking(move || {
+            let file = open_canonical_file(&open_path)?;
+            let meta = file.metadata()?;
+            Ok::<_, io::Error>((file, meta))
+        })
+        .await
+        .map_err(|source| FileRefError::Io {
+            path: raw.to_string(),
+            source: io::Error::other(source),
+        })?
+        .map_err(|source| FileRefError::Io {
+            path: raw.to_string(),
+            source,
+        })?;
+        let resolved = resolved_file(raw, canonical, &meta)?;
+        self.authorize_path(raw, &resolved.path).await?;
+        let bytes = tokio::task::spawn_blocking(move || {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            Ok::<_, io::Error>(bytes)
+        })
+        .await
+        .map_err(|source| FileRefError::Io {
+            path: raw.to_string(),
+            source: io::Error::other(source),
+        })?
+        .map_err(|source| FileRefError::Io {
+            path: raw.to_string(),
+            source,
+        })?;
+        Ok((resolved, bytes))
+    }
+
+    /// Resolve names and containment before either metadata lookup or opening.
+    async fn canonical_path(&self, raw: &str) -> Result<PathBuf, FileRefError> {
         if raw.is_empty() {
             return Err(FileRefError::Empty);
         }
@@ -252,36 +324,91 @@ impl FileRoots {
         if !inside {
             return Err(FileRefError::OutsideRoots(raw.to_string()));
         }
-        if let Some(reason) = self.guard.as_ref().and_then(|guard| guard(&canonical)) {
+        Ok(canonical)
+    }
+
+    /// Apply host policy to the canonical name associated with the operation.
+    async fn authorize_path(&self, raw: &str, canonical: &Path) -> Result<(), FileRefError> {
+        if let Some(reason) = self.guard.as_ref().and_then(|guard| guard(canonical)) {
             return Err(FileRefError::Refused {
                 path: raw.to_string(),
                 reason,
             });
         }
         if let Some(guard) = &self.async_guard {
-            if let Some(reason) = guard(canonical.clone()).await {
+            if let Some(reason) = guard(canonical.to_path_buf()).await {
                 return Err(FileRefError::Refused {
                     path: raw.to_string(),
                     reason,
                 });
             }
         }
-        let meta = tokio::fs::metadata(&canonical)
-            .await
-            .map_err(|source| FileRefError::Io {
-                path: raw.to_string(),
-                source,
-            })?;
-        if !meta.is_file() {
-            return Err(FileRefError::NotAFile(raw.to_string()));
-        }
-        let media_type = media_type_for(&canonical).map(str::to_string);
-        Ok(ResolvedFile {
-            path: canonical,
-            size_bytes: meta.len(),
-            media_type,
-        })
+        Ok(())
     }
+}
+
+/// Build the metadata snapshot after checking the opened or resolved file type.
+fn resolved_file(
+    raw: &str,
+    canonical: PathBuf,
+    meta: &std::fs::Metadata,
+) -> Result<ResolvedFile, FileRefError> {
+    if !meta.is_file() {
+        return Err(FileRefError::NotAFile(raw.to_string()));
+    }
+    let media_type = media_type_for(&canonical).map(str::to_string);
+    Ok(ResolvedFile {
+        path: canonical,
+        size_bytes: meta.len(),
+        media_type,
+    })
+}
+
+/// Open each canonical component relative to its retained parent capability.
+/// Checking only the final component would permit a parent-directory swap to
+/// redirect an otherwise approved name, including within a broad allowed root.
+fn open_canonical_file(path: &Path) -> io::Result<std::fs::File> {
+    use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
+    use cap_std::fs::{Dir, OpenOptions};
+
+    let anchor = path
+        .ancestors()
+        .last()
+        .filter(|anchor| anchor.is_absolute())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected a canonical absolute path",
+            )
+        })?;
+    let relative = path
+        .strip_prefix(anchor)
+        .map_err(|source| io::Error::new(io::ErrorKind::InvalidInput, source))?;
+    let mut directory = Dir::open_ambient_dir(anchor, cap_std::ambient_authority())?;
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unexpected canonical path component",
+            ));
+        };
+        if components.peek().is_some() {
+            directory = directory.open_dir_nofollow(name)?;
+        } else {
+            let mut options = OpenOptions::new();
+            // Inspect the opened type without waiting for a FIFO writer. Only
+            // regular files proceed to host authorization and byte reads.
+            options.read(true).follow(FollowSymlinks::No).nonblock(true);
+            return directory
+                .open_with(name, &options)
+                .map(cap_std::fs::File::into_std);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "expected a file path",
+    ))
 }
 
 /// Media type for a file extension, for the kinds artifacts commonly hold.
@@ -310,3 +437,7 @@ pub fn media_type_for(path: &Path) -> Option<&'static str> {
         _ => return None,
     })
 }
+
+#[cfg(test)]
+#[path = "file_ref_tests.rs"]
+mod tests;

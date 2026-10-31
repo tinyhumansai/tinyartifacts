@@ -19,6 +19,8 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 # Capability-based filesystem operations keep `FsFileStore` keys under its root.
 cap-std = "4"
+# Open every source path component without following symlinks before host authorization.
+cap-fs-ext = "4"
 tokio = { version = "1", features = ["fs", "rt"] }
 tracing = "0.1"
 tinytools = { git = "https://github.com/tinyhumansai/tinytools.git", rev = "41cc80ac9acf37a14f20be94f60ee552749f1540", version = "0.6" }
