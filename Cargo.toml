@@ -6,7 +6,7 @@ exclude = ["vendor", "worktrees"]
 [workspace.package]
 version = "0.1.1"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/tiny-artifacts"
 
@@ -25,9 +25,9 @@ tokio = { version = "1", features = ["fs", "rt"] }
 tracing = "0.1"
 tinytools = { git = "https://github.com/tinyhumansai/tinytools.git", rev = "41cc80ac9acf37a14f20be94f60ee552749f1540", version = "0.6" }
 # Artifact records and file bytes use the host-bound stable storage ports.
-tinystoragedrivers-types = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers.git", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
-tinystoragedrivers-api = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers.git", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
-tinystoragedrivers-testkit = { version = "2.1.2", git = "https://github.com/tinyhumansai/tinystoragedrivers.git", rev = "6226b9484c8bd01c58741718cd89ba90a13a36bb" }
+tinystoragedrivers-types = { version = "2.1.3", git = "https://github.com/tinyhumansai/tinystoragedrivers.git", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
+tinystoragedrivers-api = { version = "2.1.3", git = "https://github.com/tinyhumansai/tinystoragedrivers.git", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
+tinystoragedrivers-testkit = { version = "2.1.3", git = "https://github.com/tinyhumansai/tinystoragedrivers.git", rev = "f5a33025b9feaa36fea522cce764fe8c796e5139" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
